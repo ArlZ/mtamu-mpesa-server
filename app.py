@@ -316,23 +316,24 @@ def callback():
             items = {i["Name"]: i.get("Value") for i in stk["CallbackMetadata"]["Item"]}
             transaction_id = items.get("MpesaReceiptNumber", "—")
             paid_amount    = items.get("Amount", "—")
-            logger.info("✅ Payment SUCCESS — Txn: %s | Amount: KES %s", transaction_id, paid_amount)
+            # Daraja returns the paying phone directly — use it for sheet matching
+            daraja_phone   = str(items.get("PhoneNumber", "")).strip()
+            logger.info("✅ Payment SUCCESS — Txn: %s | Amount: KES %s | Phone: %s",
+                        transaction_id, paid_amount, daraja_phone)
 
-            # Retrieve stored order details
+            # Keep pending_payments tidy (pop for logging; data not needed for sheet)
             order = pending_payments.pop(checkout_id, {})
+            logger.info("Order details: %s", order)
 
+            # Send only what the Apps Script needs to match and stamp the row
             sheet_row = {
-                "timestamp":      nairobi_now(),
-                "first_name":     order.get("first_name", "—"),
-                "last_name":      order.get("last_name", "—"),
-                "phone":          order.get("phone", items.get("PhoneNumber", "—")),
-                "pickup_time":    order.get("pickup_time", "—"),
-                "meal":           order.get("meal", "—"),
-                "amount":         paid_amount or order.get("amount", "—"),
-                "transaction_id": transaction_id
+                "phone":          daraja_phone or order.get("phone", "—"),
+                "amount":         paid_amount,
+                "transaction_id": transaction_id,
+                "timestamp":      nairobi_now()
             }
 
-            logger.info("Writing to Sheet: %s", sheet_row)
+            logger.info("Posting to Sheet: %s", sheet_row)
             post_to_sheet(sheet_row)
 
         else:
