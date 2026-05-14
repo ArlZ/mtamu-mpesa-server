@@ -99,6 +99,17 @@ def extract_pickup_time(data: dict) -> str:
             val = str(value).strip()
             if val and val not in ("{}", "None", ""):
                 return val
+    # Fallback: parse JotForm's human-readable 'pretty' field
+    pretty = str(data.get("pretty", ""))
+    for label in ("Pickup Time:", "Collection Time:", "Time Slot:", "Pickup:", "Time:"):
+        idx = pretty.find(label)
+        if idx != -1:
+            after = pretty[idx + len(label):]
+            m = re.match(r"(.+?)(?:,\s|$)", after)
+            if m:
+                val = m.group(1).strip()
+                if val:
+                    return val
     return "—"
 
 
@@ -135,6 +146,18 @@ def extract_meal(data: dict) -> str:
             val = str(value).strip()
             if val:
                 return val
+    # Fallback: parse JotForm's human-readable 'pretty' field
+    pretty = str(data.get("pretty", ""))
+    for label in ("Choose Your Main Meal:", "Choose Your Meal:", "Main Meal:", "Meal Choice:", "Meal:"):
+        idx = pretty.find(label)
+        if idx != -1:
+            after = pretty[idx + len(label):]
+            # Meal descriptions can contain commas, so read until next "Key:" pattern
+            m = re.match(r"(.+?)(?:,\s+[A-Z][a-zA-Z &]+:|$)", after, re.DOTALL)
+            if m:
+                val = m.group(1).strip()
+                if val:
+                    return val
     return "—"
 
 
@@ -147,7 +170,13 @@ def flatten_jotform_payload(raw: dict) -> dict:
                 continue
             except Exception:
                 pass
-        flat[k] = v
+        # JotForm sends name fields as nested dicts: {"first": "Arlon", "last": "Gichane"}
+        # Flatten them to key[first] / key[last] so our extractors can find them
+        if isinstance(v, dict):
+            for sub_k, sub_v in v.items():
+                flat[f"{k}[{sub_k}]"] = sub_v
+        else:
+            flat[k] = v
     return flat
 
 
