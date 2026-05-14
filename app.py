@@ -56,6 +56,33 @@ def format_phone(phone: str) -> str:
     return phone
 
 
+def extract_first_name(data: dict) -> str:
+    """Extract first name — checks for JotForm's [first] suffix pattern first."""
+    for key, value in data.items():
+        k = key.lower()
+        if "first" in k or k.endswith("[first]"):
+            val = str(value).strip()
+            if val:
+                return val
+    # Fallback: first word of the combined name field
+    full = extract_name(data)
+    return full.split()[0] if full and " " in full else full
+
+
+def extract_last_name(data: dict) -> str:
+    """Extract last name — checks for JotForm's [last] suffix pattern first."""
+    for key, value in data.items():
+        k = key.lower()
+        if "last" in k or "surname" in k or "lname" in k or k.endswith("[last]"):
+            val = str(value).strip()
+            if val:
+                return val
+    # Fallback: everything after the first word
+    full = extract_name(data)
+    parts = full.split()
+    return " ".join(parts[1:]) if len(parts) > 1 else "—"
+
+
 def extract_name(data: dict) -> str:
     for key, value in data.items():
         if any(t in key.lower() for t in ("name", "fullname", "full_name", "customer")):
@@ -63,6 +90,16 @@ def extract_name(data: dict) -> str:
             if val:
                 return val
     return "Unknown"
+
+
+def extract_pickup_time(data: dict) -> str:
+    """Extract pickup/collection time from the form submission."""
+    for key, value in data.items():
+        if any(t in key.lower() for t in ("pickup", "collection", "collect", "slot", "schedule", "time", "when", "hour")):
+            val = str(value).strip()
+            if val and val not in ("{}", "None", ""):
+                return val
+    return "—"
 
 
 def extract_phone(data: dict):
@@ -165,11 +202,14 @@ def webhook():
         if not amount:
             return jsonify({"error": "Could not find payment amount", "received_keys": list(data.keys())}), 400
 
-        phone_fmt = format_phone(phone)
-        name      = extract_name(data)
-        meal      = extract_meal(data)
+        phone_fmt   = format_phone(phone)
+        first_name  = extract_first_name(data)
+        last_name   = extract_last_name(data)
+        name        = extract_name(data)
+        meal        = extract_meal(data)
+        pickup_time = extract_pickup_time(data)
 
-        logger.info("Initiating STK Push → %s | %s | KES %s", name, phone_fmt, amount)
+        logger.info("Initiating STK Push → %s %s | %s | KES %s", first_name, last_name, phone_fmt, amount)
 
         # Daraja auth + STK Push
         token     = get_access_token()
@@ -203,11 +243,14 @@ def webhook():
         checkout_id = result.get("CheckoutRequestID")
         if checkout_id:
             pending_payments[checkout_id] = {
-                "name":      name,
-                "phone":     phone_fmt,
-                "meal":      meal,
-                "amount":    amount,
-                "timestamp": nairobi_now()
+                "first_name":  first_name,
+                "last_name":   last_name,
+                "name":        name,
+                "phone":       phone_fmt,
+                "meal":        meal,
+                "pickup_time": pickup_time,
+                "amount":      amount,
+                "timestamp":   nairobi_now()
             }
             logger.info("Stored pending payment for CheckoutRequestID: %s", checkout_id)
 
@@ -251,8 +294,10 @@ def callback():
 
             sheet_row = {
                 "timestamp":      nairobi_now(),
-                "name":           order.get("name", "—"),
+                "first_name":     order.get("first_name", "—"),
+                "last_name":      order.get("last_name", "—"),
                 "phone":          order.get("phone", items.get("PhoneNumber", "—")),
+                "pickup_time":    order.get("pickup_time", "—"),
                 "meal":           order.get("meal", "—"),
                 "amount":         paid_amount or order.get("amount", "—"),
                 "transaction_id": transaction_id
