@@ -18,7 +18,7 @@ SHORTCODE       = os.environ.get("SHORTCODE",       "4574141")
 PASSKEY         = os.environ.get("PASSKEY",         "e365eedebcc81a96e1e35b2b03f3d5e03e0b3e6840dec31623eaa218c6671dc6")
 
 # Set this to your Render URL once deployed (e.g. https://mtamu-mpesa.onrender.com)
-BASE_URL = os.environ.get("BASE_URL", "https://your-app-name.onrender.com")
+BASE_URL = os.environ.get("BASE_URL", "https://mtamu-mpesa-server.onrender.com")
 
 DARAJA_AUTH_URL = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
 DARAJA_STK_URL  = "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
