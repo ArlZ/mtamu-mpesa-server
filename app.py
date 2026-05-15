@@ -139,6 +139,29 @@ def extract_amount(data: dict):
     return None
 
 
+def extract_quantity(data: dict) -> int:
+    """Extract order quantity. Defaults to 1 if not found."""
+    # Try keyword match on field names first
+    for key, value in data.items():
+        if any(t in key.lower() for t in ("quantity", "qty", "quant")):
+            try:
+                q = int(str(value).strip())
+                if 1 <= q <= 50:
+                    return q
+            except (ValueError, TypeError):
+                pass
+    # Fallback: parse JotForm's human-readable 'pretty' field
+    pretty = str(data.get("pretty", ""))
+    idx = pretty.find("Quantity:")
+    if idx != -1:
+        m = re.match(r"\s*(\d+)", pretty[idx + 9:])
+        if m:
+            q = int(m.group(1))
+            if 1 <= q <= 50:
+                return q
+    return 1
+
+
 def extract_meal(data: dict) -> str:
     """Return the raw meal/order field value for logging in the Sheet."""
     for key, value in data.items():
@@ -223,8 +246,10 @@ def webhook():
         if len(recent_webhooks) > 20:
             recent_webhooks.pop(0)
 
-        phone  = extract_phone(data)
-        amount = extract_amount(data)
+        phone      = extract_phone(data)
+        unit_price = extract_amount(data)
+        quantity   = extract_quantity(data)
+        amount     = unit_price * quantity if unit_price else None
 
         if not phone:
             return jsonify({"error": "Could not find M-PESA phone number", "received_keys": list(data.keys())}), 400
@@ -238,7 +263,8 @@ def webhook():
         meal        = extract_meal(data)
         pickup_time = extract_pickup_time(data)
 
-        logger.info("Initiating STK Push → %s %s | %s | KES %s", first_name, last_name, phone_fmt, amount)
+        logger.info("Initiating STK Push → %s %s | %s | KES %s x%s = KES %s",
+                    first_name, last_name, phone_fmt, unit_price, quantity, amount)
 
         # Daraja auth + STK Push
         token     = get_access_token()
