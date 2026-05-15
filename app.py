@@ -110,15 +110,15 @@ def extract_phone(data: dict):
 def extract_unit_price(pretty: str):
     """Extract the per-meal price from the meal label in the pretty field."""
     meal_text = parse_pretty_field(pretty, "Choose Your Main Meal")
-    # Meal strings end with e.g. "-KES 150" or "KES- 250" or "KES 330"
-    nums = re.findall(r"(?:KES[-\s]*|[-\s]*KES)\s*(\d{2,5})", meal_text, re.IGNORECASE)
+    # Meal strings end with e.g. "-KES 150" or "KES- 250" or "KES 1" (test items)
+    nums = re.findall(r"(?:KES[-\s]*|[-\s]*KES)\s*(\d{1,5})", meal_text, re.IGNORECASE)
     if nums:
         return int(nums[-1])
-    # Broader fallback: any 2-5 digit number in range
-    all_nums = re.findall(r"\b(\d{2,5})\b", meal_text)
+    # Broader fallback: any 1-5 digit number in range
+    all_nums = re.findall(r"\b(\d{1,5})\b", meal_text)
     for n in reversed(all_nums):
         v = int(n)
-        if 50 <= v <= 5000:
+        if 1 <= v <= 99999:
             return v
     return None
 
