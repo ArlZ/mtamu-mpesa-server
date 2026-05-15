@@ -19,21 +19,59 @@ PASSKEY         = os.environ.get("PASSKEY",         "e365eedebcc81a96e1e35b2b03f
 BASE_URL        = os.environ.get("BASE_URL",        "https://mtamu-mpesa-server.onrender.com")
 
 # ── Google Sheets Webhook (Apps Script Web App URL) ────────────────────────────
-# Paste your deployed Apps Script URL here after following the setup steps
 SHEETS_WEBHOOK_URL = os.environ.get("SHEETS_WEBHOOK_URL", "https://script.google.com/macros/s/AKfycbxFhSZQUjgvq_cy2bynHBjAHjFdcREGjJGMGVUnVuBx40AiuR4fgkGWnDFbqHBjatR2/exec")
 
 DARAJA_AUTH_URL = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
 DARAJA_STK_URL  = "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
 
 # ── In-memory stores ───────────────────────────────────────────────────────────
-# Maps CheckoutRequestID → order details captured from JotForm webhook
-pending_payments = {}
-
-# Last 20 webhook payloads for debugging
-recent_webhooks = []
+pending_payments = {}   # CheckoutRequestID → full order details
+recent_webhooks  = []   # Last 20 raw payloads for debugging
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Pretty-field parser ────────────────────────────────────────────────────────
+# JotForm always includes a 'pretty' field: a human-readable summary of the
+# entire form submission, e.g.:
+#   "Choose Your Main Meal:Greener Pastures..., Pickup Time:7:00 PM, Full Name:Arlon Gichane, ..."
+# We extract values from it using exact label names, which is far more reliable
+# than guessing from opaque field names like q5_q5_radio3.
+
+_PRETTY_LABELS = [
+    "Choose Your Main Meal",
+    "Choose Your Starch",
+    "Vegetable Preference",
+    "Chili Preference",
+    "Quantity",
+    "Office Location",
+    "Pickup Time",
+    "Full Name",
+    "Phone Number (M-Pesa)",
+    "WhatsApp Confirmation",
+]
+
+def parse_pretty_field(pretty: str, label: str) -> str:
+    """
+    Extract the value of a labelled field from JotForm's 'pretty' summary string.
+    Correctly handles values containing commas (e.g. long meal descriptions).
+    Returns empty string if the label is not found.
+    """
+    target = label + ":"
+    idx = pretty.find(target)
+    if idx == -1:
+        return ""
+    start = idx + len(target)
+    end   = len(pretty)
+    # Stop at the earliest occurrence of any other known label boundary
+    for other in _PRETTY_LABELS:
+        if other == label:
+            continue
+        boundary = pretty.find(", " + other + ":", start)
+        if 0 < boundary < end:
+            end = boundary
+    return pretty[start:end].strip()
+
+
+# ── Core helpers ───────────────────────────────────────────────────────────────
 
 def get_access_token():
     credentials = base64.b64encode(f"{CONSUMER_KEY}:{CONSUMER_SECRET}".encode()).decode()
@@ -56,64 +94,8 @@ def format_phone(phone: str) -> str:
     return phone
 
 
-def extract_first_name(data: dict) -> str:
-    """Extract first name — checks for JotForm's [first] suffix pattern first."""
-    for key, value in data.items():
-        k = key.lower()
-        if "first" in k or k.endswith("[first]"):
-            val = str(value).strip()
-            if val:
-                return val
-    # Fallback: first word of the combined name field
-    full = extract_name(data)
-    return full.split()[0] if full and " " in full else full
-
-
-def extract_last_name(data: dict) -> str:
-    """Extract last name — checks for JotForm's [last] suffix pattern first."""
-    for key, value in data.items():
-        k = key.lower()
-        if "last" in k or "surname" in k or "lname" in k or k.endswith("[last]"):
-            val = str(value).strip()
-            if val:
-                return val
-    # Fallback: everything after the first word
-    full = extract_name(data)
-    parts = full.split()
-    return " ".join(parts[1:]) if len(parts) > 1 else "—"
-
-
-def extract_name(data: dict) -> str:
-    for key, value in data.items():
-        if any(t in key.lower() for t in ("name", "fullname", "full_name", "customer")):
-            val = str(value).strip()
-            if val:
-                return val
-    return "Unknown"
-
-
-def extract_pickup_time(data: dict) -> str:
-    """Extract pickup/collection time from the form submission."""
-    for key, value in data.items():
-        if any(t in key.lower() for t in ("pickup", "collection", "collect", "slot", "schedule", "time", "when", "hour")):
-            val = str(value).strip()
-            if val and val not in ("{}", "None", ""):
-                return val
-    # Fallback: parse JotForm's human-readable 'pretty' field
-    pretty = str(data.get("pretty", ""))
-    for label in ("Pickup Time:", "Collection Time:", "Time Slot:", "Pickup:", "Time:"):
-        idx = pretty.find(label)
-        if idx != -1:
-            after = pretty[idx + len(label):]
-            m = re.match(r"(.+?)(?:,\s|$)", after)
-            if m:
-                val = m.group(1).strip()
-                if val:
-                    return val
-    return "—"
-
-
 def extract_phone(data: dict):
+    """Find phone via regex — works on q11_phoneNumber11 and any phone-labelled field."""
     phone_re = re.compile(r"((?:\+?254|0)[17]\d{8})")
     priority_keys = [k for k in data if any(t in k.lower() for t in ("phone", "mpesa", "tel", "mobile", "number"))]
     search_order  = priority_keys + [k for k in data if k not in priority_keys]
@@ -125,63 +107,38 @@ def extract_phone(data: dict):
     return None
 
 
-def extract_amount(data: dict):
-    priority_keys = [k for k in data if any(t in k.lower() for t in
-                     ("meal", "amount", "price", "total", "cost", "payment", "order", "item"))]
-    search_order  = priority_keys + [k for k in data if k not in priority_keys]
-    for key in search_order:
-        val = str(data[key]).replace(",", "")
-        nums = re.findall(r"\b(\d{2,6})\b", val)
-        for n in reversed(nums):
-            amount = int(n)
-            if 10 <= amount <= 70000:
-                return amount
+def extract_unit_price(pretty: str) -> int | None:
+    """Extract the per-meal price from the meal label in the pretty field."""
+    meal_text = parse_pretty_field(pretty, "Choose Your Main Meal")
+    # Meal strings end with e.g. "-KES 150" or "KES- 250" or "KES 330"
+    nums = re.findall(r"(?:KES[-\s]*|[-\s]*KES)\s*(\d{2,5})", meal_text, re.IGNORECASE)
+    if nums:
+        return int(nums[-1])
+    # Broader fallback: any 2-5 digit number in range
+    all_nums = re.findall(r"\b(\d{2,5})\b", meal_text)
+    for n in reversed(all_nums):
+        v = int(n)
+        if 50 <= v <= 5000:
+            return v
     return None
 
 
-def extract_quantity(data: dict) -> int:
-    """Extract order quantity. Defaults to 1 if not found."""
-    # Try keyword match on field names first
-    for key, value in data.items():
-        if any(t in key.lower() for t in ("quantity", "qty", "quant")):
-            try:
-                q = int(str(value).strip())
-                if 1 <= q <= 50:
-                    return q
-            except (ValueError, TypeError):
-                pass
-    # Fallback: parse JotForm's human-readable 'pretty' field
-    pretty = str(data.get("pretty", ""))
-    idx = pretty.find("Quantity:")
-    if idx != -1:
-        m = re.match(r"\s*(\d+)", pretty[idx + 9:])
-        if m:
-            q = int(m.group(1))
-            if 1 <= q <= 50:
-                return q
-    return 1
+def post_to_sheet(order: dict):
+    """POST confirmed order data to the Google Apps Script webhook."""
+    if not SHEETS_WEBHOOK_URL or SHEETS_WEBHOOK_URL == "PASTE_YOUR_APPS_SCRIPT_URL_HERE":
+        logger.warning("SHEETS_WEBHOOK_URL not configured — skipping Sheet update.")
+        return
+    try:
+        resp = requests.post(SHEETS_WEBHOOK_URL, json=order, timeout=15)
+        logger.info("Sheet update response: %s", resp.text)
+    except Exception as exc:
+        logger.error("Failed to post to Sheet: %s", exc)
 
 
-def extract_meal(data: dict) -> str:
-    """Return the raw meal/order field value for logging in the Sheet."""
-    for key, value in data.items():
-        if any(t in key.lower() for t in ("meal", "order", "item", "dish", "food")):
-            val = str(value).strip()
-            if val:
-                return val
-    # Fallback: parse JotForm's human-readable 'pretty' field
-    pretty = str(data.get("pretty", ""))
-    for label in ("Choose Your Main Meal:", "Choose Your Meal:", "Main Meal:", "Meal Choice:", "Meal:"):
-        idx = pretty.find(label)
-        if idx != -1:
-            after = pretty[idx + len(label):]
-            # Meal descriptions can contain commas, so read until next "Key:" pattern
-            m = re.match(r"(.+?)(?:,\s+[A-Z][a-zA-Z &]+:|$)", after, re.DOTALL)
-            if m:
-                val = m.group(1).strip()
-                if val:
-                    return val
-    return "—"
+def nairobi_now() -> str:
+    from datetime import timezone, timedelta
+    eat = timezone(timedelta(hours=3))
+    return datetime.now(eat).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def flatten_jotform_payload(raw: dict) -> dict:
@@ -193,41 +150,15 @@ def flatten_jotform_payload(raw: dict) -> dict:
                 continue
             except Exception:
                 pass
-        # JotForm sends name fields as nested dicts: {"first": "Arlon", "last": "Gichane"}
-        # Flatten them to key[first] / key[last] so our extractors can find them
-        if isinstance(v, dict):
-            for sub_k, sub_v in v.items():
-                flat[f"{k}[{sub_k}]"] = sub_v
-        else:
-            flat[k] = v
+        flat[k] = v
     return flat
-
-
-def post_to_sheet(order: dict):
-    """POST confirmed order data to the Google Apps Script webhook."""
-    if not SHEETS_WEBHOOK_URL or SHEETS_WEBHOOK_URL == "PASTE_YOUR_APPS_SCRIPT_URL_HERE":
-        logger.warning("SHEETS_WEBHOOK_URL not configured — skipping Sheet update.")
-        return
-
-    try:
-        resp = requests.post(SHEETS_WEBHOOK_URL, json=order, timeout=15)
-        logger.info("Sheet update response: %s", resp.text)
-    except Exception as exc:
-        logger.error("Failed to post to Sheet: %s", exc)
-
-
-def nairobi_now() -> str:
-    """Return current Nairobi time as a readable string."""
-    from datetime import timezone, timedelta
-    eat = timezone(timedelta(hours=3))
-    return datetime.now(eat).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Receives JotForm submission → triggers M-PESA STK Push → stores order in memory."""
+    """Receives JotForm submission → extracts order → triggers M-PESA STK Push."""
     try:
         if request.content_type and "json" in request.content_type:
             raw = request.get_json(force=True) or {}
@@ -246,27 +177,37 @@ def webhook():
         if len(recent_webhooks) > 20:
             recent_webhooks.pop(0)
 
-        phone      = extract_phone(data)
-        unit_price = extract_amount(data)
-        quantity   = extract_quantity(data)
-        amount     = unit_price * quantity if unit_price else None
+        # ── Extract everything from JotForm's 'pretty' field ──────────────────
+        pretty = str(data.get("pretty", ""))
 
+        full_name   = parse_pretty_field(pretty, "Full Name")
+        name_parts  = full_name.split()
+        first_name  = name_parts[0] if name_parts else "—"
+        last_name   = " ".join(name_parts[1:]) if len(name_parts) > 1 else "—"
+
+        meal        = parse_pretty_field(pretty, "Choose Your Main Meal") or "—"
+        pickup_time = parse_pretty_field(pretty, "Pickup Time") or "—"
+
+        qty_str     = parse_pretty_field(pretty, "Quantity")
+        quantity    = int(qty_str) if qty_str.isdigit() else 1
+
+        # Phone via regex (most reliable)
+        phone = extract_phone(data)
         if not phone:
-            return jsonify({"error": "Could not find M-PESA phone number", "received_keys": list(data.keys())}), 400
-        if not amount:
-            return jsonify({"error": "Could not find payment amount", "received_keys": list(data.keys())}), 400
+            return jsonify({"error": "Could not find M-PESA phone number"}), 400
 
-        phone_fmt   = format_phone(phone)
-        first_name  = extract_first_name(data)
-        last_name   = extract_last_name(data)
-        name        = extract_name(data)
-        meal        = extract_meal(data)
-        pickup_time = extract_pickup_time(data)
+        # Amount = unit price × quantity
+        unit_price = extract_unit_price(pretty)
+        if not unit_price:
+            return jsonify({"error": "Could not find meal price in pretty field", "pretty": pretty}), 400
 
-        logger.info("Initiating STK Push → %s %s | %s | KES %s x%s = KES %s",
-                    first_name, last_name, phone_fmt, unit_price, quantity, amount)
+        amount    = unit_price * quantity
+        phone_fmt = format_phone(phone)
 
-        # Daraja auth + STK Push
+        logger.info("Order → %s %s | %s | %s x%s = KES %s | %s",
+                    first_name, last_name, phone_fmt, unit_price, quantity, amount, pickup_time)
+
+        # ── Daraja STK Push ───────────────────────────────────────────────────
         token     = get_access_token()
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         password  = base64.b64encode(f"{SHORTCODE}{PASSKEY}{timestamp}".encode()).decode()
@@ -294,20 +235,21 @@ def webhook():
         result = stk_resp.json()
         logger.info("STK Push response: %s", result)
 
-        # Store order details keyed by CheckoutRequestID so the callback can find them
+        # ── Store full order details keyed by CheckoutRequestID ───────────────
         checkout_id = result.get("CheckoutRequestID")
         if checkout_id:
             pending_payments[checkout_id] = {
                 "first_name":  first_name,
                 "last_name":   last_name,
-                "name":        name,
                 "phone":       phone_fmt,
                 "meal":        meal,
                 "pickup_time": pickup_time,
+                "quantity":    quantity,
+                "unit_price":  unit_price,
                 "amount":      amount,
                 "timestamp":   nairobi_now()
             }
-            logger.info("Stored pending payment for CheckoutRequestID: %s", checkout_id)
+            logger.info("Stored pending payment: %s", checkout_id)
 
         return jsonify({
             "status":          "STK Push initiated",
@@ -325,8 +267,8 @@ def webhook():
 def callback():
     """
     Daraja calls this after the customer acts on the STK Push.
-    On success → writes confirmed order row to Google Sheet.
-    On failure → logs it (order is NOT written to Sheet).
+    On success → appends the full confirmed order to Google Sheet.
+    On failure → logs and discards (nothing written to Sheet).
     """
     data = request.get_json(force=True) or {}
     logger.info("Payment callback:\n%s", json.dumps(data, indent=2))
@@ -338,38 +280,35 @@ def callback():
         checkout_id = stk.get("CheckoutRequestID")
 
         if result_code == 0:
-            # ── Payment successful ──────────────────────────────────────────
-            items = {i["Name"]: i.get("Value") for i in stk["CallbackMetadata"]["Item"]}
+            # ── Payment confirmed ─────────────────────────────────────────────
+            items          = {i["Name"]: i.get("Value") for i in stk["CallbackMetadata"]["Item"]}
             transaction_id = items.get("MpesaReceiptNumber", "—")
             paid_amount    = items.get("Amount", "—")
-            # Daraja returns the paying phone directly — use it for sheet matching
-            daraja_phone   = str(items.get("PhoneNumber", "")).strip()
-            logger.info("✅ Payment SUCCESS — Txn: %s | Amount: KES %s | Phone: %s",
-                        transaction_id, paid_amount, daraja_phone)
+            logger.info("✅ Payment SUCCESS — Txn: %s | KES %s", transaction_id, paid_amount)
 
-            # Keep pending_payments tidy (pop for logging; data not needed for sheet)
             order = pending_payments.pop(checkout_id, {})
-            logger.info("Order details: %s", order)
+            logger.info("Order: %s", order)
 
-            # Send only what the Apps Script needs to match and stamp the row
+            # Full row — every field captured at submission time
             sheet_row = {
-                "phone":          daraja_phone or order.get("phone", "—"),
+                "timestamp":      nairobi_now(),
+                "first_name":     order.get("first_name", "—"),
+                "last_name":      order.get("last_name",  "—"),
+                "phone":          order.get("phone",      "—"),
+                "pickup_time":    order.get("pickup_time","—"),
+                "meal":           order.get("meal",       "—"),
+                "quantity":       order.get("quantity",   1),
                 "amount":         paid_amount,
                 "transaction_id": transaction_id,
-                "timestamp":      nairobi_now()
             }
 
-            logger.info("Posting to Sheet: %s", sheet_row)
+            logger.info("Writing to Sheet: %s", sheet_row)
             post_to_sheet(sheet_row)
 
         else:
-            # ── Payment failed / cancelled / timed out ──────────────────────
             order = pending_payments.pop(checkout_id, {})
-            logger.warning(
-                "❌ Payment FAILED (code %s): %s | Order: %s",
-                result_code, result_desc, order
-            )
-            # Order is NOT written to the Sheet — only confirmed payments appear there
+            logger.warning("❌ Payment FAILED (code %s): %s | Order: %s",
+                           result_code, result_desc, order)
 
     except Exception as exc:
         logger.error("Callback parse error: %s", exc)
