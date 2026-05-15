@@ -107,7 +107,7 @@ def extract_phone(data: dict):
     return None
 
 
-def extract_unit_price(pretty: str) -> int | None:
+def extract_unit_price(pretty: str):
     """Extract the per-meal price from the meal label in the pretty field."""
     meal_text = parse_pretty_field(pretty, "Choose Your Main Meal")
     # Meal strings end with e.g. "-KES 150" or "KES- 250" or "KES 330"
@@ -124,13 +124,35 @@ def extract_unit_price(pretty: str) -> int | None:
 
 
 def post_to_sheet(order: dict):
-    """POST confirmed order data to the Google Apps Script webhook."""
+    """POST confirmed order data to the Google Apps Script webhook.
+
+    Google Apps Script Web Apps redirect the initial POST (302/303).
+    Python's requests follows the redirect but downgrades to GET, so doGet
+    fires instead of doPost and nothing gets written.  We disable automatic
+    redirect following and re-POST to the redirect URL manually.
+    """
     if not SHEETS_WEBHOOK_URL or SHEETS_WEBHOOK_URL == "PASTE_YOUR_APPS_SCRIPT_URL_HERE":
         logger.warning("SHEETS_WEBHOOK_URL not configured — skipping Sheet update.")
         return
     try:
-        resp = requests.post(SHEETS_WEBHOOK_URL, json=order, timeout=15)
-        logger.info("Sheet update response: %s", resp.text)
+        resp = requests.post(SHEETS_WEBHOOK_URL, json=order, timeout=15,
+                             allow_redirects=False)
+        logger.info("Sheet webhook initial response: %s %s",
+                    resp.status_code, resp.headers.get("Location", ""))
+
+        # Follow the redirect as a POST (Google Apps Script always redirects)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            redirect_url = resp.headers.get("Location")
+            if redirect_url:
+                resp = requests.post(redirect_url, json=order, timeout=15)
+                logger.info("Sheet webhook redirect response: %s %s",
+                            resp.status_code, resp.text)
+            else:
+                logger.error("Redirect with no Location header")
+        else:
+            logger.info("Sheet webhook response (no redirect): %s %s",
+                        resp.status_code, resp.text)
+
     except Exception as exc:
         logger.error("Failed to post to Sheet: %s", exc)
 
