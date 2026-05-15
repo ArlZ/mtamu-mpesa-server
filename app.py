@@ -154,19 +154,24 @@ def post_to_sheet(order: dict):
         if sheet.row_count == 0 or not sheet.cell(1, 1).value:
             sheet.append_row([
                 "Confirmed At", "First Name", "Last Name", "Phone (M-Pesa)",
-                "Pickup Time", "Meal", "Qty", "Amount Paid (KES)", "M-PESA Transaction ID"
+                "Pickup Time", "Office Location", "Main Meal", "Starch",
+                "Vegetables", "Chili", "Qty", "Amount Paid (KES)", "M-PESA Transaction ID"
             ])
 
         sheet.append_row([
-            order.get("timestamp",      nairobi_now()),
-            order.get("first_name",     "—"),
-            order.get("last_name",      "—"),
-            order.get("phone",          "—"),
-            order.get("pickup_time",    "—"),
-            order.get("meal",           "—"),
-            order.get("quantity",       1),
-            order.get("amount",         "—"),
-            order.get("transaction_id", "—"),
+            order.get("timestamp",       nairobi_now()),
+            order.get("first_name",      "—"),
+            order.get("last_name",       "—"),
+            order.get("phone",           "—"),
+            order.get("pickup_time",     "—"),
+            order.get("office_location", "—"),
+            order.get("meal",            "—"),
+            order.get("starch",          "—"),
+            order.get("vegetable",       "—"),
+            order.get("chili",           "—"),
+            order.get("quantity",        1),
+            order.get("amount",          "—"),
+            order.get("transaction_id",  "—"),
         ])
         logger.info("✅ Sheet row written for %s %s",
                     order.get("first_name"), order.get("last_name"))
@@ -225,8 +230,12 @@ def webhook():
         first_name  = name_parts[0] if name_parts else "—"
         last_name   = " ".join(name_parts[1:]) if len(name_parts) > 1 else "—"
 
-        meal        = parse_pretty_field(pretty, "Choose Your Main Meal") or "—"
-        pickup_time = parse_pretty_field(pretty, "Pickup Time") or "—"
+        meal            = parse_pretty_field(pretty, "Choose Your Main Meal") or "—"
+        starch          = parse_pretty_field(pretty, "Choose Your Starch") or "—"
+        vegetable       = parse_pretty_field(pretty, "Vegetable Preference") or "—"
+        chili           = parse_pretty_field(pretty, "Chili Preference") or "—"
+        office_location = parse_pretty_field(pretty, "Office Location") or "—"
+        pickup_time     = parse_pretty_field(pretty, "Pickup Time") or "—"
 
         qty_str     = parse_pretty_field(pretty, "Quantity")
         quantity    = int(qty_str) if qty_str.isdigit() else 1
@@ -279,15 +288,19 @@ def webhook():
         checkout_id = result.get("CheckoutRequestID")
         if checkout_id:
             pending_payments[checkout_id] = {
-                "first_name":  first_name,
-                "last_name":   last_name,
-                "phone":       phone_fmt,
-                "meal":        meal,
-                "pickup_time": pickup_time,
-                "quantity":    quantity,
-                "unit_price":  unit_price,
-                "amount":      amount,
-                "timestamp":   nairobi_now()
+                "first_name":      first_name,
+                "last_name":       last_name,
+                "phone":           phone_fmt,
+                "meal":            meal,
+                "starch":          starch,
+                "vegetable":       vegetable,
+                "chili":           chili,
+                "office_location": office_location,
+                "pickup_time":     pickup_time,
+                "quantity":        quantity,
+                "unit_price":      unit_price,
+                "amount":          amount,
+                "timestamp":       nairobi_now()
             }
             logger.info("Stored pending payment: %s", checkout_id)
 
@@ -331,15 +344,19 @@ def callback():
 
             # Full row — every field captured at submission time
             sheet_row = {
-                "timestamp":      nairobi_now(),
-                "first_name":     order.get("first_name", "—"),
-                "last_name":      order.get("last_name",  "—"),
-                "phone":          order.get("phone",      "—"),
-                "pickup_time":    order.get("pickup_time","—"),
-                "meal":           order.get("meal",       "—"),
-                "quantity":       order.get("quantity",   1),
-                "amount":         paid_amount,
-                "transaction_id": transaction_id,
+                "timestamp":       nairobi_now(),
+                "first_name":      order.get("first_name",      "—"),
+                "last_name":       order.get("last_name",       "—"),
+                "phone":           order.get("phone",           "—"),
+                "pickup_time":     order.get("pickup_time",     "—"),
+                "office_location": order.get("office_location", "—"),
+                "meal":            order.get("meal",            "—"),
+                "starch":          order.get("starch",          "—"),
+                "vegetable":       order.get("vegetable",       "—"),
+                "chili":           order.get("chili",           "—"),
+                "quantity":        order.get("quantity",        1),
+                "amount":          paid_amount,
+                "transaction_id":  transaction_id,
             }
 
             logger.info("Writing to Sheet: %s", sheet_row)
