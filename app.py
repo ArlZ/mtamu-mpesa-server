@@ -6,6 +6,8 @@ import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
+import gspread
+from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -18,8 +20,10 @@ SHORTCODE       = os.environ.get("SHORTCODE",       "4574141")
 PASSKEY         = os.environ.get("PASSKEY",         "e365eedebcc81a96e1e35b2b03f3d5e03e0b3e6840dec31623eaa218c6671dc6")
 BASE_URL        = os.environ.get("BASE_URL",        "https://mtamu-mpesa-server.onrender.com")
 
-# ── Google Sheets Webhook (Apps Script Web App URL) ────────────────────────────
-SHEETS_WEBHOOK_URL = os.environ.get("SHEETS_WEBHOOK_URL", "https://script.google.com/macros/s/AKfycbxFhSZQUjgvq_cy2bynHBjAHjFdcREGjJGMGVUnVuBx40AiuR4fgkGWnDFbqHBjatR2/exec")
+# ── Google Sheets (Sheets API via service account) ─────────────────────────────
+SPREADSHEET_ID     = os.environ.get("SPREADSHEET_ID", "")
+SHEET_TAB_NAME     = "Confirmed Orders"
+_SHEETS_SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
 
 DARAJA_AUTH_URL = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
 DARAJA_STK_URL  = "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
@@ -124,38 +128,51 @@ def extract_unit_price(pretty: str):
 
 
 def post_to_sheet(order: dict):
-    """POST confirmed order data to the Google Apps Script webhook.
-
-    Google Apps Script executes doPost() on the initial POST to the /exec URL,
-    then returns a 302 redirect to a googleusercontent.com echo URL that serves
-    the script's response output.  That echo URL only accepts GET — re-POSTing
-    to it returns 405.  We therefore:
-      1. POST to the /exec URL (this triggers doPost and writes the sheet row)
-      2. GET the redirect URL to retrieve and log the script's response
-    """
-    if not SHEETS_WEBHOOK_URL or SHEETS_WEBHOOK_URL == "PASTE_YOUR_APPS_SCRIPT_URL_HERE":
-        logger.warning("SHEETS_WEBHOOK_URL not configured — skipping Sheet update.")
+    """Append a confirmed order row directly to Google Sheets via the Sheets API."""
+    if not SPREADSHEET_ID:
+        logger.warning("SPREADSHEET_ID not set — skipping Sheet update.")
         return
     try:
-        resp = requests.post(SHEETS_WEBHOOK_URL, json=order, timeout=15,
-                             allow_redirects=False)
-        logger.info("Sheet webhook initial response: %s", resp.status_code)
+        creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+        if not creds_json:
+            logger.error("GOOGLE_CREDENTIALS_JSON not set — cannot write to Sheet.")
+            return
 
-        if resp.status_code in (301, 302, 303, 307, 308):
-            redirect_url = resp.headers.get("Location")
-            if redirect_url:
-                # GET the echo URL — this retrieves doPost's return value
-                echo = requests.get(redirect_url, timeout=15)
-                logger.info("Sheet webhook script response: %s %s",
-                            echo.status_code, echo.text[:300])
-            else:
-                logger.error("Sheet webhook: redirect with no Location header")
-        else:
-            logger.info("Sheet webhook direct response: %s %s",
-                        resp.status_code, resp.text[:300])
+        creds_dict = json.loads(creds_json)
+        creds      = Credentials.from_service_account_info(creds_dict, scopes=_SHEETS_SCOPES)
+        client     = gspread.authorize(creds)
+
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+        # Get or create the tab
+        try:
+            sheet = spreadsheet.worksheet(SHEET_TAB_NAME)
+        except gspread.WorksheetNotFound:
+            sheet = spreadsheet.add_worksheet(title=SHEET_TAB_NAME, rows=1000, cols=10)
+
+        # Add header row if the sheet is empty
+        if sheet.row_count == 0 or not sheet.cell(1, 1).value:
+            sheet.append_row([
+                "Confirmed At", "First Name", "Last Name", "Phone (M-Pesa)",
+                "Pickup Time", "Meal", "Qty", "Amount Paid (KES)", "M-PESA Transaction ID"
+            ])
+
+        sheet.append_row([
+            order.get("timestamp",      nairobi_now()),
+            order.get("first_name",     "—"),
+            order.get("last_name",      "—"),
+            order.get("phone",          "—"),
+            order.get("pickup_time",    "—"),
+            order.get("meal",           "—"),
+            order.get("quantity",       1),
+            order.get("amount",         "—"),
+            order.get("transaction_id", "—"),
+        ])
+        logger.info("✅ Sheet row written for %s %s",
+                    order.get("first_name"), order.get("last_name"))
 
     except Exception as exc:
-        logger.error("Failed to post to Sheet: %s", exc)
+        logger.error("Failed to write to Sheet: %s", exc)
 
 
 def nairobi_now() -> str:
